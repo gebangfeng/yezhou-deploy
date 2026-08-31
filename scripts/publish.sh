@@ -2,9 +2,9 @@
 set -euo pipefail
 
 if [ "$#" -lt 1 ] || [ ! -f "$1" ]; then echo "Usage: publish.sh <html-file> [title]" >&2; exit 1; fi
-if [ -z "${YEZHOU_API_TOKEN:-}" ]; then echo "Error: YEZHOU_API_TOKEN is not set. Create one at ${YEZHOU_BASE_URL:-https://yezhou-html-share.gebangfeng-520.workers.dev}/agent" >&2; exit 1; fi
+if [ -z "${YEZHOU_API_TOKEN:-}" ]; then echo "Error: YEZHOU_API_TOKEN is not set. Create one at ${YEZHOU_BASE_URL:-https://yz.gbfeng.com}/agent" >&2; exit 1; fi
 
-INPUT_FILE="$1"; TITLE="${2:-}"; BASE_URL="${YEZHOU_BASE_URL:-https://yezhou-html-share.gebangfeng-520.workers.dev}"
+INPUT_FILE="$1"; TITLE="${2:-}"; BASE_URL="${YEZHOU_BASE_URL:-https://yz.gbfeng.com}"
 PROJECT_DIR="$(cd "$(dirname "$INPUT_FILE")" && pwd)"; STATE_FILE="$PROJECT_DIR/.yezhou.json"
 
 PAYLOAD_FILE="$(mktemp)"; trap 'rm -f "$PAYLOAD_FILE"' EXIT
