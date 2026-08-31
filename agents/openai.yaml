@@ -1,0 +1,4 @@
+interface:
+  display_name: "Yezhou Share"
+  short_description: "发布或更新页舟 HTML，保持分享链接不变"
+  default_prompt: "使用页舟发布这个 HTML；如果项目已绑定，则更新原链接。"
