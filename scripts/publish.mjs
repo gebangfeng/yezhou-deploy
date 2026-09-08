@@ -1,20 +1,33 @@
 #!/usr/bin/env node
 
-import { appendFile, chmod, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
-import { homedir, platform } from "node:os";
+import { chmod, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { homedir, hostname, platform } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
-const commandArguments=process.argv.slice(2),trackState=commandArguments.includes("--track-state"),positionals=commandArguments.filter(argument=>argument!=="--track-state");
+const commandArguments=process.argv.slice(2),positionals=[];let listOnly=false,siteArgument="";
+for(let index=0;index<commandArguments.length;index+=1){
+  const argument=commandArguments[index];
+  if(argument==="--list")listOnly=true;
+  else if(argument==="--site"){
+    siteArgument=commandArguments[index+1]||"";index+=1;
+    if(!siteArgument)fail("--site requires a site ID or public URL.");
+  }else if(argument.startsWith("--site=")){
+    siteArgument=argument.slice(7);if(!siteArgument)fail("--site requires a site ID or public URL.");
+  }
+  else if(argument.startsWith("--"))fail(`Unknown option: ${argument}`);
+  else positionals.push(argument);
+}
 const [inputArgument,title=""] = positionals;
-if (!inputArgument) fail("Usage: node publish.mjs <html-file|directory|zip-file> [title] [--track-state]");
+if (!inputArgument&&!listOnly) fail("Usage: node publish.mjs <html-file|directory|zip-file> [title] [--site <id|url>]\n       node publish.mjs --list");
+if(listOnly&&(inputArgument||siteArgument))fail("--list cannot be combined with an input or --site.");
 
-const inputPath = resolve(inputArgument);
+const inputPath = inputArgument?resolve(inputArgument):"";
 let inputStats;
-try { inputStats = await stat(inputPath); }
-catch (error) { fail(`Unable to read ${inputPath}: ${error instanceof Error ? error.message : String(error)}`); }
-const inputKind = inputStats.isDirectory() ? "directory" : /\.zip$/i.test(inputPath) ? "zip" : "html";
-const projectDirectory = inputKind === "directory" ? inputPath : dirname(inputPath);
+if(inputPath){try { inputStats = await stat(inputPath); }
+catch (error) { fail(`Unable to read ${inputPath}: ${error instanceof Error ? error.message : String(error)}`); }}
+const inputKind = inputStats?.isDirectory() ? "directory" : /\.zip$/i.test(inputPath) ? "zip" : "html";
+const projectDirectory = inputKind === "directory" ? inputPath : dirname(inputPath||resolve("."));
 const stateFile = join(projectDirectory,".yezhou.json");
 const sourceName = inputKind === "directory" ? "." : basename(inputPath);
 const bindingKey = `${inputKind}:${platform()==="win32"?sourceName.toLowerCase():sourceName}`;
@@ -23,6 +36,9 @@ const configRoot = process.env.YEZHOU_CONFIG_DIR || (platform() === "win32"
   ? join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "yezhou")
   : join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "yezhou"));
 const credentialFile = join(configRoot, "credentials");
+const systemName=({darwin:"macOS",win32:"Windows",linux:"Linux"})[platform()]||platform();
+const deviceName=Array.from(hostname()).filter(character=>character.charCodeAt(0)>=32&&character.charCodeAt(0)!==127).join("").trim()||"未知设备";
+const authorizationLabel=`页舟 Deploy · ${systemName} · ${deviceName}`.slice(0,40);
 
 function fail(message) {
   console.error(message);
@@ -49,25 +65,9 @@ function openBrowser(url) {
 
 const sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 
-async function exists(path){try{await stat(path);return true;}catch{return false;}}
-
-async function ignoreStateFile() {
-  if(trackState)return;
-  let directory=projectDirectory;
-  while(true){
-    if(await exists(join(directory,".git"))){
-      const ignoreFile=join(directory,".gitignore");let content="";try{content=await readFile(ignoreFile,"utf8");}catch{/* A repository may not have a .gitignore yet. */}
-      const covered=content.split(/\r?\n/).map(line=>line.trim()).some(line=>line===".yezhou.json"||line==="**/.yezhou.json"||line==="*.yezhou.json");
-      if(!covered){const prefix=content&&!content.endsWith("\n")?"\n":"";await appendFile(ignoreFile,`${prefix}# 页舟部署绑定\n.yezhou.json\n`,"utf8");console.log("Added .yezhou.json to .gitignore");}
-      return;
-    }
-    const parent=dirname(directory);if(parent===directory)return;directory=parent;
-  }
-}
-
 async function authorize() {
   const { response, body } = await api("/api/agent/device/code", {
-    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({label:`页舟 Deploy · ${platform()}`}),
+    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({label:authorizationLabel}),
   });
   if (!response.ok || !body.deviceCode || !body.verificationUriComplete) fail(body.error || "Unable to start browser authorization.");
   console.log(`Authorization code: ${body.userCode}`);
@@ -95,6 +95,17 @@ async function authorize() {
 async function savedCredential() {
   try { return (await readFile(credentialFile,"utf8")).trim(); }
   catch { return ""; }
+}
+
+function siteIdFrom(value){
+  const trimmed=value.trim();
+  if(/^[a-f0-9]{12}$/i.test(trimmed))return trimmed.toLowerCase();
+  try{const match=new URL(trimmed).pathname.match(/^\/p\/([a-f0-9]{12})(?:\/|$)/i);if(match)return match[1].toLowerCase();}catch{/* The value may be an ID rather than a URL. */}
+  fail(`Invalid site ID or public URL: ${value}`);
+}
+
+async function listSites(accessToken){
+  return api("/api/agent/sites",{headers:{Authorization:`Bearer ${accessToken}`}});
 }
 
 async function directoryFiles(directory,prefix="") {
@@ -126,29 +137,37 @@ async function publish(accessToken, payload, siteId) {
   });
 }
 
-let payload;
-if(inputKind==="html"){
-  let html;try{html=await readFile(inputPath,"utf8");}catch(error){fail(`Unable to read ${inputPath}: ${error instanceof Error?error.message:String(error)}`);}
-  payload={html,title};
-}else payload=await projectPayload();
-
-let state = {};
-try { state = JSON.parse(await readFile(stateFile,"utf8")); } catch { /* A first publish has no project state yet. */ }
-const manifest=state&&typeof state==="object"&&!Array.isArray(state)?state:{};
-const bindings=manifest.bindings&&typeof manifest.bindings==="object"&&!Array.isArray(manifest.bindings)?manifest.bindings:{};
-const legacyBinding=typeof manifest.siteId==="string"?{siteId:manifest.siteId,url:manifest.url}:null;
-const savedBinding=bindings[bindingKey],binding=savedBinding&&typeof savedBinding==="object"?savedBinding:legacyBinding||{};
 let accessToken = await savedCredential();
 if (!accessToken) accessToken = await authorize();
 
-let result = await publish(accessToken,payload,typeof binding.siteId === "string" ? binding.siteId : "");
-if (result.response.status === 401) {
-  await unlink(credentialFile).catch(()=>{});
-  accessToken = await authorize();
-  result = await publish(accessToken,payload,typeof binding.siteId === "string" ? binding.siteId : "");
+if(listOnly){
+  let result=await listSites(accessToken);
+  if(result.response.status===401){await unlink(credentialFile).catch(()=>{});accessToken=await authorize();result=await listSites(accessToken);}
+  if(!result.response.ok||!Array.isArray(result.body.sites))fail(result.body.error||`Unable to list sites (HTTP ${result.response.status}).`);
+  if(!result.body.sites.length)console.log("No published sites found for this account.");
+  else for(const site of result.body.sites)console.log(`${site.id}\t${site.projectType||"single"}\t${site.title||"未命名页面"}\t${site.url}`);
+}else{
+  let payload;
+  if(inputKind==="html"){
+    let html;try{html=await readFile(inputPath,"utf8");}catch(error){fail(`Unable to read ${inputPath}: ${error instanceof Error?error.message:String(error)}`);}
+    payload={html,title};
+  }else payload=await projectPayload();
+
+  let state = {};
+  try { state = JSON.parse(await readFile(stateFile,"utf8")); } catch { /* A first publish has no project state yet. */ }
+  const manifest=state&&typeof state==="object"&&!Array.isArray(state)?state:{};
+  const bindings=manifest.bindings&&typeof manifest.bindings==="object"&&!Array.isArray(manifest.bindings)?manifest.bindings:{};
+  const legacyBinding=typeof manifest.siteId==="string"?{siteId:manifest.siteId,url:manifest.url}:null;
+  const savedBinding=bindings[bindingKey],binding=savedBinding&&typeof savedBinding==="object"?savedBinding:legacyBinding||{};
+  const selectedSiteId=siteArgument?siteIdFrom(siteArgument):(typeof binding.siteId==="string"?binding.siteId:"");
+  let result = await publish(accessToken,payload,selectedSiteId);
+  if (result.response.status === 401) {
+    await unlink(credentialFile).catch(()=>{});
+    accessToken = await authorize();
+    result = await publish(accessToken,payload,selectedSiteId);
+  }
+  if (!result.response.ok || !result.body.url || !result.body.id) fail(result.body.error || `Publish failed with HTTP ${result.response.status}.`);
+  const nextState={version:2,bindings:{...bindings,[bindingKey]:{source:sourceName,type:inputKind,siteId:result.body.id,url:result.body.url}}};
+  await writeFile(stateFile,`${JSON.stringify(nextState,null,2)}\n`,"utf8");
+  console.log(`${result.body.created ? "Published" : "Updated"}: ${result.body.url}`);
 }
-if (!result.response.ok || !result.body.url || !result.body.id) fail(result.body.error || `Publish failed with HTTP ${result.response.status}.`);
-const nextState={version:2,bindings:{...bindings,[bindingKey]:{source:sourceName,type:inputKind,siteId:result.body.id,url:result.body.url}}};
-await writeFile(stateFile,`${JSON.stringify(nextState,null,2)}\n`,"utf8");
-await ignoreStateFile();
-console.log(`${result.body.created ? "Published" : "Updated"}: ${result.body.url}`);
