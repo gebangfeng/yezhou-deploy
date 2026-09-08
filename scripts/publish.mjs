@@ -2,7 +2,7 @@
 
 import { chmod, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
 const [, , inputArgument, title = ""] = process.argv;
@@ -14,7 +14,9 @@ try { inputStats = await stat(inputPath); }
 catch (error) { fail(`Unable to read ${inputPath}: ${error instanceof Error ? error.message : String(error)}`); }
 const inputKind = inputStats.isDirectory() ? "directory" : /\.zip$/i.test(inputPath) ? "zip" : "html";
 const projectDirectory = inputKind === "directory" ? inputPath : dirname(inputPath);
-const stateFile = join(projectDirectory, ".yezhou.json");
+const stateFile = join(projectDirectory,".yezhou.json");
+const sourceName = inputKind === "directory" ? "." : basename(inputPath);
+const bindingKey = `${inputKind}:${platform()==="win32"?sourceName.toLowerCase():sourceName}`;
 const baseUrl = (process.env.YEZHOU_BASE_URL || "https://yz.gbfeng.com").replace(/\/$/, "");
 const configRoot = process.env.YEZHOU_CONFIG_DIR || (platform() === "win32"
   ? join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "yezhou")
@@ -93,6 +95,7 @@ async function projectPayload() {
   const form=new FormData();if(title)form.set("title",title);
   if(inputKind==="zip"){form.set("archive",new Blob([await readFile(inputPath)],{type:"application/zip"}),inputPath.split(/[\\/]/).pop()||"project.zip");return form;}
   const files=await directoryFiles(inputPath);if(!files.length)fail("The project directory is empty.");
+  const svgFiles=files.filter(file=>/\.svg$/i.test(file.relative));if(svgFiles.length)fail(`页舟暂不支持 SVG 文件，请转换为 PNG、WebP 或安全的 HTML/CSS 图标：\n${svgFiles.map(file=>`- ${file.relative}`).join("\n")}`);
   for(const file of files)form.append("files",new Blob([await readFile(file.absolute)]),file.relative.split("/").pop());
   form.set("paths",JSON.stringify(files.map(file=>file.relative)));return form;
 }
@@ -114,15 +117,20 @@ if(inputKind==="html"){
 
 let state = {};
 try { state = JSON.parse(await readFile(stateFile,"utf8")); } catch { /* A first publish has no project state yet. */ }
+const manifest=state&&typeof state==="object"&&!Array.isArray(state)?state:{};
+const bindings=manifest.bindings&&typeof manifest.bindings==="object"&&!Array.isArray(manifest.bindings)?manifest.bindings:{};
+const legacyBinding=typeof manifest.siteId==="string"?{siteId:manifest.siteId,url:manifest.url}:null;
+const savedBinding=bindings[bindingKey],binding=savedBinding&&typeof savedBinding==="object"?savedBinding:legacyBinding||{};
 let accessToken = await savedCredential();
 if (!accessToken) accessToken = await authorize();
 
-let result = await publish(accessToken,payload,typeof state.siteId === "string" ? state.siteId : "");
+let result = await publish(accessToken,payload,typeof binding.siteId === "string" ? binding.siteId : "");
 if (result.response.status === 401) {
   await unlink(credentialFile).catch(()=>{});
   accessToken = await authorize();
-  result = await publish(accessToken,payload,typeof state.siteId === "string" ? state.siteId : "");
+  result = await publish(accessToken,payload,typeof binding.siteId === "string" ? binding.siteId : "");
 }
 if (!result.response.ok || !result.body.url || !result.body.id) fail(result.body.error || `Publish failed with HTTP ${result.response.status}.`);
-await writeFile(stateFile,`${JSON.stringify({siteId:result.body.id,url:result.body.url},null,2)}\n`,"utf8");
+const nextState={version:2,bindings:{...bindings,[bindingKey]:{source:sourceName,type:inputKind,siteId:result.body.id,url:result.body.url}}};
+await writeFile(stateFile,`${JSON.stringify(nextState,null,2)}\n`,"utf8");
 console.log(`${result.body.created ? "Published" : "Updated"}: ${result.body.url}`);
