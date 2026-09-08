@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
-import { chmod, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
-const [, , inputArgument, title = ""] = process.argv;
-if (!inputArgument) fail("Usage: node publish.mjs <html-file> [title]");
+const commandArguments=process.argv.slice(2),trackState=commandArguments.includes("--track-state"),positionals=commandArguments.filter(argument=>argument!=="--track-state");
+const [inputArgument,title=""] = positionals;
+if (!inputArgument) fail("Usage: node publish.mjs <html-file|directory|zip-file> [title] [--track-state]");
 
 const inputPath = resolve(inputArgument);
 let inputStats;
@@ -47,6 +48,22 @@ function openBrowser(url) {
 }
 
 const sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+
+async function exists(path){try{await stat(path);return true;}catch{return false;}}
+
+async function ignoreStateFile() {
+  if(trackState)return;
+  let directory=projectDirectory;
+  while(true){
+    if(await exists(join(directory,".git"))){
+      const ignoreFile=join(directory,".gitignore");let content="";try{content=await readFile(ignoreFile,"utf8");}catch{/* A repository may not have a .gitignore yet. */}
+      const covered=content.split(/\r?\n/).map(line=>line.trim()).some(line=>line===".yezhou.json"||line==="**/.yezhou.json"||line==="*.yezhou.json");
+      if(!covered){const prefix=content&&!content.endsWith("\n")?"\n":"";await appendFile(ignoreFile,`${prefix}# 页舟部署绑定\n.yezhou.json\n`,"utf8");console.log("Added .yezhou.json to .gitignore");}
+      return;
+    }
+    const parent=dirname(directory);if(parent===directory)return;directory=parent;
+  }
+}
 
 async function authorize() {
   const { response, body } = await api("/api/agent/device/code", {
@@ -133,4 +150,5 @@ if (result.response.status === 401) {
 if (!result.response.ok || !result.body.url || !result.body.id) fail(result.body.error || `Publish failed with HTTP ${result.response.status}.`);
 const nextState={version:2,bindings:{...bindings,[bindingKey]:{source:sourceName,type:inputKind,siteId:result.body.id,url:result.body.url}}};
 await writeFile(stateFile,`${JSON.stringify(nextState,null,2)}\n`,"utf8");
+await ignoreStateFile();
 console.log(`${result.body.created ? "Published" : "Updated"}: ${result.body.url}`);
